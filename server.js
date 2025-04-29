@@ -8,11 +8,9 @@ const templateRoutes = require("./routes/templateRoutes");
 const scheduleRoutes  = require("./routes/scheduleRoutes");
 const profileRoutes = require("./routes/profileRoutes");
 const teamRoutes = require("./routes/teamRoutes");
-const campaignRoutes = require("./routes/campaignRoutes");
 
 const fs = require("fs");
 const { init: initDispatcher } = require("./workers/dispatchScheduledJobs");
-const { initCampaignDispatcher } = require("./workers/campaignDispatcher");
 
 dotenv.config();
 connectDB();
@@ -32,11 +30,9 @@ app.use("/api/templates", templateRoutes);
 app.use("/api/schedule",  scheduleRoutes);
 app.use("/api/profile",  profileRoutes);
 app.use("/api/team", teamRoutes);
-app.use("/api/campaigns", campaignRoutes);
 
 initDispatcher().catch(err => console.error("Dispatcher init failed:", err));
 
-initCampaignDispatcher().catch(err => console.error("Dispatcher init failed:", err));
  // start the scheduler in the background
 //  require("./workers/scheduler");
 
