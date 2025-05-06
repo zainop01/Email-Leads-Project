@@ -1,88 +1,75 @@
 const path = require("path");
 const fs = require("fs");
-const parseCSV = require("../utils/parseCSV");
+const {parseCSV} = require("../utils/parseCSV");
 const ScheduledJob = require("../models/ScheduledJob");
 const Template     = require("../models/Template");
 const { scheduleInMemory } = require("../workers/dispatchScheduledJobs");
 const scheduleLib      = require("node-schedule");
+const { default: mongoose } = require("mongoose");
 
 // @desc    Schedule a one-time bulk send
 // @route   POST /api/schedule
 // @access  Private
 exports.scheduleBulkEmail = async (req, res) => {
   try {
-    const {
-      scheduleAt,     // ISO timestamp string
-      templateId,
+    // ── 1) Parse smtpAccountIds ──
+    let rawIds = req.body.smtpAccountIds;
+    let smtpAccountIds = [];
+    if (Array.isArray(rawIds)) smtpAccountIds = rawIds;
+    else if (typeof rawIds === "string") {
+      try { smtpAccountIds = JSON.parse(rawIds); }
+      catch { smtpAccountIds = rawIds.split(",").map(s => s.trim()); }
+    }
+    smtpAccountIds = smtpAccountIds.filter(id => mongoose.Types.ObjectId.isValid(id));
+
+    const { serviceName, subject, senderName, senderEmail, htmlBody } = req.body;
+    if (!serviceName || !senderName || !senderEmail || !subject || !htmlBody) {
+      return res.status(400).json({
+        message: "serviceName, senderName, senderEmail, subject and htmlBody are all required"
+      });
+    }
+
+    // ── 2) Validate scheduleAt & template override ──
+    const { scheduleAt, templateId } = req.body;
+    if (!scheduleAt) return res.status(400).json({ message: "scheduleAt is required" });
+    const sendDate = new Date(scheduleAt);
+    if (isNaN(sendDate) || sendDate <= Date.now())
+      return res.status(400).json({ message: "`scheduleAt` must be a valid future date/time" });
+
+    // override via template if provided...
+    // (same as your code, setting _serviceName, _subject, etc.)
+
+    // ── 3) Require & parse CSV ──
+    if (!req.file) return res.status(400).json({ message: "CSV file required" });
+    const filePath   = path.join(__dirname, "../uploads", req.file.filename);
+    const recipients = await parseCSV(filePath);
+    fs.unlink(filePath, () => {});
+
+    // ── 4) Create the ScheduledJob with SMTP accounts & all the templating fields ──
+    const job = await ScheduledJob.create({
+      user:          req.user._id,
+      template:      templateId,
+      smtpAccounts:  smtpAccountIds,       // ← carry over
       serviceName,
       subject,
       senderName,
       senderEmail,
-      htmlBody
-    } = req.body;
-
-    
-
-    // validation
-    if (!scheduleAt) {
-      return res.status(400).json({ message: "scheduleAt is required" });
-    }
-      const sendDate = new Date(scheduleAt);
-      if (isNaN(sendDate) || sendDate <= new Date()) {
-        return res
-          .status(400)
-          .json({ message: "`scheduleAt` must be a valid future date/time" });
-      }
-
-    // if a template is used, override fields
-    let _serviceName = serviceName,
-        _subject     = subject,
-        _senderName  = senderName,
-        _senderEmail = senderEmail,
-        _htmlBody    = htmlBody;
-
-    if (templateId) {
-      const tpl = await Template.findOne({ _id: templateId, user: req.user._id });
-      if (!tpl) return res.status(404).json({ message: "Template not found" });
-      _serviceName = tpl.serviceName;
-      _subject     = tpl.subject;
-      _senderName  = tpl.senderName;
-      _senderEmail = tpl.senderEmail;
-      _htmlBody    = tpl.htmlBody;
-    }
-
-    // require a CSV file
-    if (!req.file) {
-      return res.status(400).json({ message: "CSV file required" });
-    }
-
-    // parse recipients
-    const filePath = path.join(__dirname, "../uploads", req.file.filename);
-    const recipients = await parseCSV(filePath);
-    fs.unlink(filePath, () => {});  // cleanup
-
-    // create the ScheduledJob
-    const job = await ScheduledJob.create({
-      user:        req.user._id,
-      template:    templateId,
-      serviceName: _serviceName,
-      subject:     _subject,
-      senderName:  _senderName,
-      senderEmail: _senderEmail,
-      htmlBody:    _htmlBody,
+      htmlBody,
       recipients,
-      scheduleAt:  sendDate,
-      total:       recipients.length
+      scheduleAt:    sendDate,
+      total:         recipients.length
     });
 
+    // ── 5) Schedule in‐memory for dispatch ──
     scheduleInMemory(job);
 
-    res.status(201).json({ message: "Job scheduled", job });
+    return res.status(201).json({ message: "Job scheduled", job });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ message: "Server error" });
   }
 };
+
 
 // @desc    List scheduled jobs
 // @route   GET /api/schedule

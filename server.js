@@ -8,6 +8,11 @@ const templateRoutes = require("./routes/templateRoutes");
 const scheduleRoutes  = require("./routes/scheduleRoutes");
 const profileRoutes = require("./routes/profileRoutes");
 const teamRoutes = require("./routes/teamRoutes");
+const { init: initCampaigns } = require("./workers/dispatchCampaigns");
+const campaignRoutes = require("./routes/campaignRoutes");
+const execRoutes = require("./routes/campaignExecutionRoutes");
+const smtpAccountRoutes = require("./routes/smtpAccountRoutes");
+const trackRoutes = require("./routes/trackRoutes");
 
 const fs = require("fs");
 const { init: initDispatcher } = require("./workers/dispatchScheduledJobs");
@@ -30,8 +35,13 @@ app.use("/api/templates", templateRoutes);
 app.use("/api/schedule",  scheduleRoutes);
 app.use("/api/profile",  profileRoutes);
 app.use("/api/team", teamRoutes);
+app.use("/api/campaigns", campaignRoutes);
+app.use("/api/executions", execRoutes);
+app.use("/api/smtp-accounts", smtpAccountRoutes);
+app.use("/api/emails/track", trackRoutes);
 
 initDispatcher().catch(err => console.error("Dispatcher init failed:", err));
+initCampaigns().catch(err => console.error("Campaign dispatcher failed:", err));
 
  // start the scheduler in the background
 //  require("./workers/scheduler");

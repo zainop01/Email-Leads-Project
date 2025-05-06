@@ -7,26 +7,25 @@ const axios  = require("axios");
 
 async function parseCSV(filePath) {
   return new Promise((resolve, reject) => {
-    const emails = [];
+    const rows = [];
     fs.createReadStream(filePath)
       .pipe(csv.parse({ headers: true, trim: true }))
       .on("error", err => reject(err))
       .on("data", row => {
-        // find any column whose name lower-cased is "email"
-        const key = Object.keys(row)
-          .find(k => k.toLowerCase() === "email");
-        if (key && row[key]) {
-          emails.push(row[key].trim());
+        // Only include rows with an email
+        const emailKey = Object.keys(row).find(k => k.toLowerCase() === "email");
+        if (emailKey && row[emailKey]) {
+          // normalize the email field
+          row.email = row[emailKey].trim();
+          rows.push(row);
         }
       })
       .on("end", rowCount => {
-        console.log(`⚙️  Parsed ${rowCount} rows, found ${emails.length} emails`);
-        resolve(emails);
+        console.log(`⚙️  Parsed ${rowCount} rows, retained ${rows.length} recipients`);
+        resolve(rows);
       });
   });
-
 }
-
 
 async function parseCSVUrl(url) {
   const tmpPath = path.join(os.tmpdir(), `tpl-csv-${Date.now()}.csv`);

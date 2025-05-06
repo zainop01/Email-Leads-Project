@@ -5,19 +5,14 @@ const Template   = require("../models/Template");
 const EmailJob   = require("../models/EmailJob");
 const EmailRecord= require("../models/EmailRecord");
 const { parseCSVUrl } = require("../utils/parseCSV");
+const transporter = require("../utils/mailer");
+const { render } = require("../utils/templateRenderer");
+
+
 
 // @desc    Create a new template
 // @route   POST /api/templates
 // @access  Private
-
-    const transporter = nodemailer.createTransport({
-      service: "Gmail",
-      auth: {
-        user: "zainop001@gmail.com",
-        pass: "inahbuqfbbxfwvpd",
-      },
-    });
-
 
 exports.createTemplate = async (req, res) => {
   console.log("📄  UPLOADED FILE OBJECT:", req.file);
@@ -54,9 +49,76 @@ exports.createTemplate = async (req, res) => {
 // @desc    List all templates for user
 // @route   GET /api/templates
 // @access  Private
-exports.getTemplates = async (req, res) => {
-  const templates = await Template.find({ user: req.user._id }).sort("-createdAt");
-  res.json(templates);
+exports.getTemplates = async (req, res, next) => {
+  try {
+    // 1) Extract query params (all come in as strings)
+    const {
+      search,            // full-text search string
+      serviceName,       // exact match
+      senderEmail,       // exact match
+      hasCsv,            // "true" / "false"
+      dateFrom,          // ISO date string
+      dateTo,            // ISO date string
+      sortBy = "createdAt", // field to sort on
+      order = "desc",       // "asc" or "desc"
+      page = "1",           // 1-based
+      limit = "10",         // per-page
+    } = req.query;
+
+    // 2) Build the Mongo query
+    const q = { user: req.user._id };
+
+    // full-text search on several fields
+    if (search) {
+      const re = new RegExp(search, "i");
+      q.$or = [
+        { name: re },
+        { subject: re },
+        { senderName: re },
+        { senderEmail: re },
+      ];
+    }
+
+    // exact filters
+    if (serviceName)   q.serviceName   = serviceName;
+    if (senderEmail)   q.senderEmail   = senderEmail;
+
+    // CSV presence
+    if (hasCsv === "true")  q.csvUrl = { $exists: true, $ne: null };
+    if (hasCsv === "false") q.csvUrl = { $exists: false };
+
+    // date range filter
+    if (dateFrom || dateTo) {
+      q.createdAt = {};
+      if (dateFrom) q.createdAt.$gte = new Date(dateFrom);
+      if (dateTo)   q.createdAt.$lte = new Date(dateTo);
+    }
+
+    // 3) Pagination & sorting
+    const pageNum = Math.max(1, parseInt(page, 10));
+    const perPage = Math.max(1, parseInt(limit, 10));
+    const skip    = (pageNum - 1) * perPage;
+    const sortDir = order === "asc" ? 1 : -1;
+
+    // 4) Execute queries in parallel
+    const [ total, templates ] = await Promise.all([
+      Template.countDocuments(q),
+      Template.find(q)
+        .sort({ [sortBy]: sortDir })
+        .skip(skip)
+        .limit(perPage),
+    ]);
+
+    // 5) Return paged response
+    res.json({
+      total,
+      page:  pageNum,
+      limit: perPage,
+      data:  templates,
+    });
+  } catch (err) {
+    next(err);
+  }
 };
 
 // @desc    Get single template

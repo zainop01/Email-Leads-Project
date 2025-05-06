@@ -3,95 +3,77 @@ const fs = require("fs");
 const nodemailer = require("nodemailer");
 const EmailJob = require("../models/EmailJob");
 const EmailRecord = require("../models/EmailRecord");
-const parseCSV = require("../utils/parseCSV");
+const { parseCSV } = require("../utils/parseCSV");
 const Template = require("../models/Template");
+const { getTransporters, pickTransporter } = require("../utils/mailer");
+const { render } = require("../utils/templateRenderer");
+const { default: mongoose } = require("mongoose");
+const bulkWorker = require("../workers/bulkEmailWorker");
 
 exports.sendBulkEmail = async (req, res) => {
   try {
+    // ── 1) Parse smtpAccountIds from form-data ──
+    let rawIds = req.body.smtpAccountIds;
+    let smtpAccountIds = [];
+    if (Array.isArray(rawIds)) {
+      smtpAccountIds = rawIds;
+    } else if (typeof rawIds === "string") {
+      try { smtpAccountIds = JSON.parse(rawIds); }
+      catch { smtpAccountIds = rawIds.split(",").map(s => s.trim()); }
+    }
+    smtpAccountIds = smtpAccountIds.filter(id => mongoose.Types.ObjectId.isValid(id));
+    console.log(">> Using SMTP account IDs:", smtpAccountIds);
+
+    // ── 2) Validate inputs ──
     const { serviceName, subject, senderName, senderEmail, htmlBody } = req.body;
-
-    // If a templateId was passed, load it and override fields:
-
     if (!serviceName || !senderName || !senderEmail || !subject || !htmlBody) {
-      return res
-        .status(400)
-        .json({
-          message:
-            "serviceName, senderName, senderEmail, subject and htmlBody are all required",
-        });
+      return res.status(400).json({
+        message: "serviceName, senderName, senderEmail, subject and htmlBody are all required"
+      });
     }
     if (!req.file) {
       return res.status(400).json({ message: "CSV file is required" });
     }
 
+    // ── 3) Parse CSV ──
     const filePath = path.join(__dirname, "../uploads", req.file.filename);
-    const emails = await parseCSV(filePath);
+    const rows     = await parseCSV(filePath);
+    fs.unlink(filePath, () => {}); // cleanup immediately
 
-    // create job with new fields
+    // ── 4) Create the EmailJob ──
     const job = await EmailJob.create({
-      user: req.user._id,
+      user:         req.user._id,
       serviceName,
       senderName,
       senderEmail,
       subject,
       htmlBody,
-      total: emails.length,
+      total:        rows.length,
+      sentCount:    0,
+      failedCount:  0,
+      smtpAccounts: smtpAccountIds
     });
 
-    // mailer
-    const transporter = nodemailer.createTransport({
-      service: "Gmail",
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
-    });
+    // ── 5) Hand off to the background worker ──
+    bulkWorker.start(job, rows)
+      .then(() => console.log("Bulk job completed:", job._id))
+      .catch(err => console.error("Bulk job error:", err));
 
-    // send & record
-    const sendPromises = emails.map(async (address) => {
-      try {
-        await transporter.sendMail({
-          from: `"${senderName}" <${senderEmail}>`,
-          to: address,
-          subject,
-          html: htmlBody,
-        });
-        await EmailRecord.create({
-          job: job._id,
-          email: address,
-          status: "sent",
-        });
-        job.sentCount++;
-      } catch (err) {
-        await EmailRecord.create({
-          job: job._id,
-          email: address,
-          status: "failed",
-          error: err.message,
-        });
-        job.failedCount++;
+    // ── 6) Respond immediately ──
+    return res.json({
+      message: "Emails queued for sending",
+      job: {
+        id:          job._id,
+        serviceName: job.serviceName,
+        total:       job.total,
+        sent:        job.sentCount,
+        failed:      job.failedCount
       }
     });
 
-    await Promise.all(sendPromises);
-    await job.save();
-
-    // cleanup
-    fs.unlink(filePath, () => {});
-
-    res.json({
-      message: "Emails processed",
-      job: {
-        id: job._id,
-        serviceName: job.serviceName,
-        total: job.total,
-        sent: job.sentCount,
-        failed: job.failedCount,
-      },
-    });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ message: "Server error" });
+    return res.status(500).json({ message: "Server error" });
   }
 };
 
@@ -99,57 +81,56 @@ exports.sendBulkEmail = async (req, res) => {
 // @route  GET /api/email/history
 exports.getHistory = async (req, res) => {
   try {
-    // 1) pull query‐params (with sane defaults)
     const {
-      page       = 1,
-      perPage    = 10,
-      search,                   // string to regex‐search serviceName|subject
-      bookmarked,               // 'true' | 'false'
-      startDate,                // ISO date string
-      endDate,                  // ISO date string
-      sortBy     = "createdAt", // any field on EmailJob
-      order      = "desc"       // 'asc' or 'desc'
+      page,
+      perPage,
+      search, 
+      bookmarked,
+      startDate,
+      endDate,
+      sortBy = "createdAt",
+      order = "desc",
     } = req.query;
 
-    // 2) build Mongoose filter
     const filter = { user: req.user._id };
 
     if (search) {
       filter.$or = [
         { serviceName: { $regex: search, $options: "i" } },
-        { subject:     { $regex: search, $options: "i" } }
+        { subject: { $regex: search, $options: "i" } },
       ];
     }
+
     if (bookmarked !== undefined) {
       filter.bookmarked = bookmarked === "true";
     }
+
     if (startDate || endDate) {
       filter.createdAt = {};
       if (startDate) filter.createdAt.$gte = new Date(startDate);
-      if (endDate)   filter.createdAt.$lte = new Date(endDate);
+      if (endDate) filter.createdAt.$lte = new Date(endDate);
     }
 
-    // 3) count total matching docs
+    const sortOrder = order === "asc" ? 1 : -1;
+    const query = EmailJob.find(filter).sort({ [sortBy]: sortOrder });
+
+    // If pagination explicitly passed, apply it
+    if (page && perPage) {
+      const skip = (Number(page) - 1) * Number(perPage);
+      query.skip(skip).limit(Number(perPage));
+    }
+
+    const jobs = await query.exec();
     const total = await EmailJob.countDocuments(filter);
 
-    // 4) fetch with skip/limit and sort
-    const skip      = (Number(page) - 1) * Number(perPage);
-    const sortOrder = order === "asc" ? 1 : -1;
-    const jobs      = await EmailJob
-      .find(filter)
-      .sort({ [sortBy]: sortOrder })
-      .skip(skip)
-      .limit(Number(perPage));
-
-    // 5) return envelope
     res.json({
       data: jobs,
       meta: {
         total,
-        page:       Number(page),
-        perPage:    Number(perPage),
-        totalPages: Math.ceil(total / perPage)
-      }
+        page: page ? Number(page) : 1,
+        perPage: perPage ? Number(perPage) : total,
+        totalPages: perPage ? Math.ceil(total / perPage) : 1,
+      },
     });
   } catch (err) {
     console.error(err);
@@ -157,16 +138,17 @@ exports.getHistory = async (req, res) => {
   }
 };
 
+
 // @desc   Fetch specific job's records
 // @route  GET /api/email/history/:jobId
 exports.getJobRecords = async (req, res) => {
   try {
     const { jobId } = req.params;
     const {
-      status,      // 'sent' | 'failed'
-      search,      // regex on email
-      page    = 1,
-      perPage = 10
+      status, // 'sent' | 'failed'
+      search, // regex on email
+      page = 1,
+      perPage = 10,
     } = req.query;
 
     const filter = { job: jobId };
@@ -175,10 +157,9 @@ exports.getJobRecords = async (req, res) => {
       filter.email = { $regex: search, $options: "i" };
     }
 
-    const total   = await EmailRecord.countDocuments(filter);
-    const skip    = (Number(page) - 1) * Number(perPage);
-    const records = await EmailRecord
-      .find(filter)
+    const total = await EmailRecord.countDocuments(filter);
+    const skip = (Number(page) - 1) * Number(perPage);
+    const records = await EmailRecord.find(filter)
       .skip(skip)
       .limit(Number(perPage));
 
@@ -186,17 +167,16 @@ exports.getJobRecords = async (req, res) => {
       data: records,
       meta: {
         total,
-        page:       Number(page),
-        perPage:    Number(perPage),
-        totalPages: Math.ceil(total / perPage)
-      }
+        page: Number(page),
+        perPage: Number(perPage),
+        totalPages: Math.ceil(total / perPage),
+      },
     });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Server error" });
   }
 };
-
 
 exports.updateServiceName = async (req, res) => {
   try {

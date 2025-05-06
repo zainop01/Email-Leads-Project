@@ -3,7 +3,7 @@ const mongoose = require("mongoose");
 const scheduledJobSchema = new mongoose.Schema({
   user:         { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   campaign:     { type: mongoose.Schema.Types.ObjectId, ref: "Campaign" },
-
+  smtpAccounts: [{ type: mongoose.Schema.Types.ObjectId, ref: "SmtpAccount" }],
   // same fields you already use
   template:     { type: mongoose.Schema.Types.ObjectId, ref: "Template" },
   serviceName:  { type: String, required: true },
@@ -13,7 +13,7 @@ const scheduledJobSchema = new mongoose.Schema({
   htmlBody:     { type: String, required: true },
 
   // parsed recipients
-  recipients:   [{ type: String, required: true }],
+  recipients:   [{ type: mongoose.Schema.Types.Mixed, required: true }], 
 
   // when to send
   scheduleAt:   { type: Date, required: true },
